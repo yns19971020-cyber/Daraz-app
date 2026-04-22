@@ -4,64 +4,55 @@ import * as cheerio from 'cheerio';
 export async function POST(req: Request) {
   try {
     const { url } = await req.json();
-
-    if (!url) {
-      return NextResponse.json({ error: "URL එකක් අවශ්‍යයි" }, { status: 400 });
-    }
-
     const apiKey = process.env.SCRAPINGBEE_API_KEY;
-    if (!apiKey) {
-      return NextResponse.json({ error: "API Key එක සොයාගත නොහැක. .env ෆයිල් එක පරීක්ෂා කරන්න." }, { status: 500 });
-    }
 
-    // ScrapingBee API URL එක සැකසීම (render_js=true මඟින් Daraz හි JavaScript දත්තද කියවයි)
-    const scrapingBeeUrl = `https://app.scrapingbee.com/api/v1/?api_key=${apiKey}&url=${encodeURIComponent(url)}&render_js=true`;
+    if (!url) return NextResponse.json({ error: "URL එකක් අවශ්‍යයි" }, { status: 400 });
+    if (!apiKey) return NextResponse.json({ error: "API Key එක නැත" }, { status: 500 });
 
-    // දත්ත ලබාගැනීම
+    // ScrapingBee එකට පරාමිතීන් එකතු කිරීම (Wait for price element)
+    const scrapingBeeUrl = `https://app.scrapingbee.com/api/v1/?api_key=${apiKey}&url=${encodeURIComponent(url)}&render_js=true&wait_for=.pdp-product-price,.pdp-price`;
+
     const response = await fetch(scrapingBeeUrl);
-    if (!response.ok) {
-      throw new Error(`ScrapingBee Error: ${response.statusText}`);
-    }
     const html = await response.text();
-
-    // Cheerio හරහා HTML එක කියවීම
     const $ = cheerio.load(html);
 
-    // නම ලබා ගැනීම
-    const title = $('title').text().replace(' | Daraz.lk', '').trim() || 'අලුත් භාණ්ඩය';
+    // 1. නම ගැනීම
+    const title = $('h1.pdp-mod-product-title').text().trim() || $('title').text().replace(' | Daraz.lk', '').trim();
     
-    // මිල ලබා ගැනීම
-    const priceText = $('.pdp-price_type_normal').text() || '0';
+    // 2. මිල ලබා ගැනීමට උත්සාහ කිරීම (විවිධ Selectors පාවිච්චි කර ඇත)
+    let priceText = 
+      $('.pdp-price_type_normal').first().text() || 
+      $('.pdp-product-price span').first().text() || 
+      $('[class*="price"]').first().text() || 
+      '0';
+
+    // රුපියල් ලකුණු, කොමා අයින් කර අගය ගැනීම
     let price = parseFloat(priceText.replace(/[^0-9.]/g, ''));
-    if (isNaN(price)) price = 0;
 
-    // පින්තූරය ලබා ගැනීම
+    // 3. පින්තූරය ගැනීම
     const images: string[] = [];
-    const metaImg = $('meta[property="og:image"]').attr('content');
-    if (metaImg) images.push(metaImg);
+    const metaImg = $('meta[property="og:image"]').attr('content') || $('.pdp-mod-common-image').attr('src');
+    if (metaImg) images.push(metaImg.startsWith('//') ? 'https:' + metaImg : metaImg);
 
-    if (price === 0) {
-      return NextResponse.json({ error: "මිල ලබා ගැනීමට නොහැකි විය. වෙනත් ලින්ක් එකක් උත්සාහ කරන්න." }, { status: 400 });
+    // මිල තවමත් 0 නම් error එකක් දෙන්න
+    if (!price || price === 0) {
+      return NextResponse.json({ error: "මිල හඳුනාගත නොහැකි විය. කරුණාකර වෙනත් Item එකක් උත්සාහ කරන්න." }, { status: 400 });
     }
 
-    // 5% කින් මිල වැඩි කිරීම
+    // 5% Markup එකතු කිරීම
     const displayPrice = price * 1.05;
 
-    const productData = {
-      title: title,
+    return NextResponse.json({
+      title,
       description: title,
       images: JSON.stringify(images),
       originalPrice: price,
       displayPrice: displayPrice,
       sourceUrl: url,
       source: url.includes('daraz') ? 'daraz' : 'aliexpress',
-      stockStatus: "In Stock"
-    };
-
-    return NextResponse.json(productData);
+    });
 
   } catch (error) {
-    console.error("Scraping Error:", error);
-    return NextResponse.json({ error: "දත්ත ලබාගැනීමට නොහැකි විය. කරුණාකර නැවත උත්සාහ කරන්න." }, { status: 500 });
+    return NextResponse.json({ error: "සර්වර් එකේ දෝෂයකි" }, { status: 500 });
   }
 }
